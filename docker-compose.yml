@@ -1,0 +1,11 @@
+services:
+  chat:
+    build: .
+    image: groq-cli-chat
+    env_file:
+      - .env
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./logs:/app/logs
+    command: ["--mode", "optimized"]

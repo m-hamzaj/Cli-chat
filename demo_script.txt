@@ -1,0 +1,10 @@
+Hi, my name is Sam and I'm building a small CLI tool in Python.
+What's 234 * 17 + 89? Use the calculator.
+Can you fetch https://example.com and tell me what it says?
+Nice. What's my name and what am I building, based on what I told you?
+What's 15% of 240?
+Explain in detail the tradeoffs between REST and GraphQL for a small API.
+Thanks. Now calculate 999 * 999.
+Summarize our conversation so far in one sentence.
+One more: fetch https://httpbin.org/json and tell me what's in it.
+What was the very first thing I told you about myself?
