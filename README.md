@@ -1,8 +1,9 @@
 # Groq CLI Chat
 
 A command-line chat client for the Groq API. Streaming output, multi-turn
-memory, two tools (calculator, fetch_url), and a per-call cost log — no
-LangChain, no agent framework, just a hand-rolled request loop.
+memory, two tools (calculator, fetch_url), a repeat-question cache, and a
+per-call cost log — no LangChain, no agent framework, just a hand-rolled
+request loop.
 
 ## Run it
 
@@ -27,6 +28,7 @@ Every session also writes `logs/costs.jsonl` (one line per API call) and
   sees and responds to, not a crash.
 - `app/router.py` — the model-choice heuristic used in optimized mode.
 - `app/cost_tracker.py` — Groq's per-model pricing table and the JSONL logger.
+- `app/cache.py` — the repeat-question cache (see below).
 
 Tool calls stream like everything else: one `stream=True` call is made per
 step; if it finishes with `finish_reason == "tool_calls"`, the buffered
@@ -50,6 +52,38 @@ turns onto the small model is the single biggest lever available.
 kept in memory (so `/cost` and logs reflect everything), but only the last 10
 messages are actually sent to the API each turn. `simple` mode sends the
 entire, ever-growing history every turn.
+
+## Repeat-question cache (added after the initial benchmark below)
+
+`app/cache.py` keeps a `(model, normalized question text) -> answer` map,
+persisted to `logs/response_cache.json`. Before calling the API, a turn is
+looked up by its own text; on a hit, the prior answer is replayed instantly
+at **$0.000000** — logged as a `cache_hit` row so it still shows up in
+`/cost` and the JSONL log, just at zero cost — and the real API call (plus
+any tool calls it would have made) is skipped entirely. It persists across
+separate sessions too, not just within one conversation.
+
+Verified live:
+```
+You: What is 47 times 12?
+Assistant (llama-3.1-8b-instant): [tool call: calculator] -> 564
+  (turn cost: $0.000056)
+You: What is 47 times 12?
+Assistant (llama-3.1-8b-instant) [cache hit -- exact repeat of an earlier prompt]: The result of 47 times 12 is 564.
+  (turn cost: $0.000000)
+```
+
+**Deliberate tradeoff:** the key is the question text alone, not the full
+conversation transcript. That's intentional — within a session the full
+transcript is never byte-identical between two askings of "the same"
+question (each repeat has more prior history baked into it), so a
+transcript-keyed cache would almost never fire on a real repeat. The cost is
+that it doesn't know if context shifted in between: asking "what's my name?"
+twice will replay the first answer even if you told it a different name in
+between. This mirrors the same kind of tradeoff as history trimming above —
+cheaper and simpler, at the cost of occasionally being unaware of a context
+change. Not applied to `simple` mode's baseline numbers below, since those
+predate this feature and the comparison is meant to isolate routing/trimming.
 
 ## Results
 
@@ -118,6 +152,14 @@ dropping them.
   and the log volume silently detaches (the app still prints correct
   in-memory numbers, so this fails quietly). Worth knowing if you run this
   from Git Bash on Windows instead of `docker compose`, which isn't affected.
+- **Known rough edge, caught not fixed**: `llama-3.1-8b-instant` occasionally
+  hallucinates a tool call to a name that was never in `TOOL_SCHEMAS` (seen
+  once in testing: `brave_search`, on an open-ended knowledge question). The
+  SDK rejects it and the exception surfaces as `[error handling turn: ...]`
+  — the session keeps running and the next turn works normally, satisfying
+  "tool errors must not crash the chat," but that turn doesn't get answered
+  or cached. Worth hardening later by catching that specific validation
+  error inside `run_completion()` and retrying without tools.
 
 ## Files
 
@@ -126,9 +168,11 @@ app/chat.py           REPL, streaming loop, tool-call orchestration
 app/tools.py           calculator, fetch_url, tool schemas
 app/router.py          model-choice heuristic
 app/cost_tracker.py    pricing table + JSONL/summary logging
+app/cache.py           repeat-question cache
 demo_script.txt         the 10-turn conversation used for the before/after
 analyze.py              recomputes the ablation table above from logs/costs.jsonl
 Dockerfile, docker-compose.yml
 logs/costs.jsonl        one line per API call (git-ignored in image, not in repo)
 logs/session_summary.json
+logs/response_cache.json   persisted repeat-question cache
 ```

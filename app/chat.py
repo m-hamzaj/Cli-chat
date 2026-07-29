@@ -6,6 +6,10 @@ Modes:
   --mode simple     always uses the 70B model, sends full history every turn.
   --mode optimized  (default) routes easy turns to the 8B model and caps how
                      much history is resent -- see router.py / MAX_HISTORY_MESSAGES.
+
+An exact-prompt response cache (cache.py) also applies in both modes: if the
+full sent context is byte-identical to something already answered, the
+answer is replayed for free instead of calling the API again.
 """
 
 import argparse
@@ -19,6 +23,7 @@ from groq import Groq
 from tools import TOOL_SCHEMAS, run_tool
 from router import choose_model
 from cost_tracker import CostTracker
+from cache import ResponseCache, make_key
 
 SYSTEM_PROMPT = (
     "You are a helpful, concise command-line assistant. You have two tools: "
@@ -99,13 +104,24 @@ def run_completion(client, model, messages, cost_tracker, turn_index, purpose):
     return content, tool_calls, finish_reason
 
 
-def handle_turn(client, full_history, mode, cost_tracker, turn_index, user_input):
+def handle_turn(client, full_history, mode, cost_tracker, cache, turn_index, user_input):
     full_history.append({"role": "user", "content": user_input})
     model = choose_model(user_input, mode)
     sent = [{"role": "system", "content": SYSTEM_PROMPT}] + windowed_history(full_history, mode)
 
+    cache_key = make_key(model, user_input)
+    cached_answer = cache.get(cache_key)
+    if cached_answer is not None:
+        print(f"Assistant ({model}) [cache hit -- exact repeat of an earlier prompt]: {cached_answer}")
+        full_history.append({"role": "assistant", "content": cached_answer})
+        cost_tracker.record_call(model, 0, 0, "cache_hit", turn_index)
+        turn_cost = cost_tracker.close_turn(turn_index)
+        print(f"  (turn cost: ${turn_cost:.6f})")
+        return
+
     print(f"Assistant ({model}): ", end="", flush=True)
     content, tool_calls, finish_reason = run_completion(client, model, sent, cost_tracker, turn_index, "response")
+    final_answer = content
 
     if finish_reason == "tool_calls" and tool_calls:
         assistant_msg = {
@@ -137,8 +153,11 @@ def handle_turn(client, full_history, mode, cost_tracker, turn_index, user_input
         print(f"Assistant ({model}): ", end="", flush=True)
         final_content, _, _ = run_completion(client, model, sent, cost_tracker, turn_index, "final_after_tool")
         full_history.append({"role": "assistant", "content": final_content})
+        final_answer = final_content
     else:
         full_history.append({"role": "assistant", "content": content})
+
+    cache.put(cache_key, final_answer)
 
     print()
     turn_cost = cost_tracker.close_turn(turn_index)
@@ -159,6 +178,7 @@ def main():
     client = Groq(api_key=api_key)
     session_id = args.session_id or uuid.uuid4().hex[:8]
     cost_tracker = CostTracker(session_id, args.mode)
+    cache = ResponseCache()
     full_history = []
     turn_index = 0
     interactive = sys.stdin.isatty()
@@ -194,7 +214,7 @@ def main():
 
             turn_index += 1
             try:
-                handle_turn(client, full_history, args.mode, cost_tracker, turn_index, user_input)
+                handle_turn(client, full_history, args.mode, cost_tracker, cache, turn_index, user_input)
             except Exception as e:
                 # A bad API/tool interaction should not kill the session.
                 print(f"\n  [error handling turn: {e}]")
