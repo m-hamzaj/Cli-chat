@@ -19,3 +19,13 @@ def test_optimized_mode_routes_complex_keyword_to_big_model():
 def test_optimized_mode_routes_long_message_to_big_model():
     long_message = "tell me about your day " * 15  # > 200 chars, no keyword match
     assert choose_model(long_message, "optimized") == BIG_MODEL
+
+
+def test_optimized_mode_routes_short_recall_question_to_big_model():
+    # Short and plain on its own, but answering it right means actually
+    # using history -- the 8B model was found unreliable at that even when
+    # the fact was in context, so these must not fall through to it.
+    assert choose_model("what was my id again", "optimized") == BIG_MODEL
+    assert choose_model("how many prompts of history do you retain?", "optimized") == BIG_MODEL
+    assert choose_model("did i tell you my name?", "optimized") == BIG_MODEL
+    assert choose_model("what's my name?", "optimized") == BIG_MODEL  # the earlier known-failure case
