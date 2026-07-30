@@ -173,14 +173,18 @@ dropping them.
   and the log volume silently detaches (the app still prints correct
   in-memory numbers, so this fails quietly). Worth knowing if you run this
   from Git Bash on Windows instead of `docker compose`, which isn't affected.
-- **Known rough edge, caught not fixed**: `llama-3.1-8b-instant` occasionally
-  hallucinates a tool call to a name that was never in `TOOL_SCHEMAS` (seen
-  once in testing: `brave_search`, on an open-ended knowledge question). The
-  SDK rejects it and the exception surfaces as `[error handling turn: ...]`
-  — the session keeps running and the next turn works normally, satisfying
-  "tool errors must not crash the chat," but that turn doesn't get answered
-  or cached. Worth hardening later by catching that specific validation
-  error inside `run_completion()` and retrying without tools.
+- **Fixed: hallucinated tool calls on knowledge questions.** `llama-3.1-8b-instant`
+  reliably tried to call a tool named `brave_search` — never in `TOOL_SCHEMAS`
+  — on plain factual questions ("where's Budapest?"). Two changes fixed it:
+  (1) the system prompt now explicitly says there is no search tool and to
+  answer general-knowledge questions from its own knowledge, and (2)
+  `disable_tool_validation=True` stops the SDK from hard-raising on an
+  unrecognized tool name, letting it flow into `run_tool()`'s existing
+  "unknown tool" error path instead. On top of that, `handle_turn()` now
+  loops through tool-call rounds with a hard cap (`MAX_TOOL_ROUNDS = 3`);
+  the final round is offered no tools at all, forcing a real text answer
+  instead of an empty response if the model keeps insisting on a tool that
+  doesn't exist.
 
 ## Files
 

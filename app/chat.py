@@ -26,9 +26,12 @@ from cost_tracker import CostTracker
 from cache import ResponseCache, make_key
 
 SYSTEM_PROMPT = (
-    "You are a helpful, concise command-line assistant. You have two tools: "
-    "`calculator` for arithmetic and `fetch_url` for reading a web page. Use "
-    "them when they would give a more accurate answer than reasoning alone. "
+    "You are a helpful, concise command-line assistant. You have exactly two "
+    "tools: `calculator` for arithmetic, and `fetch_url` for reading a specific "
+    "web page the user gives you a URL for. You do NOT have a search engine or "
+    "any web-search tool -- never attempt to call one. For general-knowledge "
+    "questions (facts, geography, history, definitions, etc.) answer directly "
+    "from what you already know instead of trying to look anything up. "
     "If a tool returns an error, explain the problem briefly and keep going."
 )
 
@@ -51,24 +54,39 @@ def windowed_history(history, mode):
     return history[-MAX_HISTORY_MESSAGES:]
 
 
-def run_completion(client, model, messages, cost_tracker, turn_index, purpose):
+MAX_TOOL_ROUNDS = 3  # hard cap on tool-call round-trips per turn, see handle_turn()
+
+
+def run_completion(client, model, messages, cost_tracker, turn_index, purpose, allow_tools=True):
     """One streaming call. Prints content as it arrives, accumulates any
     tool-call deltas, and logs cost from real usage when the API returns it
-    (falls back to a rough char/4 estimate if it doesn't)."""
+    (falls back to a rough char/4 estimate if it doesn't). With
+    allow_tools=False, no tools are offered at all, so the model has no
+    option but to answer in plain text -- used to force a real final answer
+    once MAX_TOOL_ROUNDS is hit."""
     tool_call_acc = {}
     content = ""
     finish_reason = None
     usage = None
 
-    stream = client.chat.completions.create(
+    kwargs = dict(
         model=model,
         messages=messages,
-        tools=TOOL_SCHEMAS,
-        tool_choice="auto",
         temperature=0.3,
         stream=True,
         extra_body={"stream_options": {"include_usage": True}},
     )
+    if allow_tools:
+        kwargs["tools"] = TOOL_SCHEMAS
+        kwargs["tool_choice"] = "auto"
+        # llama-3.1-8b-instant occasionally hallucinates a tool name (seen:
+        # 'brave_search') that was never in TOOL_SCHEMAS. Without this, the
+        # SDK raises on that instead of surfacing it as a normal tool call --
+        # disabling lets it flow into run_tool()'s existing "unknown tool"
+        # error path, which the model can see and recover from gracefully.
+        kwargs["disable_tool_validation"] = True
+
+    stream = client.chat.completions.create(**kwargs)
 
     for chunk in stream:
         if not chunk.choices:
@@ -119,11 +137,21 @@ def handle_turn(client, full_history, mode, cost_tracker, cache, turn_index, use
         print(f"  (turn cost: ${turn_cost:.6f})")
         return
 
-    print(f"Assistant ({model}): ", end="", flush=True)
-    content, tool_calls, finish_reason = run_completion(client, model, sent, cost_tracker, turn_index, "response")
-    final_answer = content
+    final_answer = None
+    for round_num in range(MAX_TOOL_ROUNDS + 1):
+        force_final = round_num == MAX_TOOL_ROUNDS  # last chance: no tools offered, must answer in text
+        purpose = "response" if round_num == 0 else ("forced_final" if force_final else "tool_round")
 
-    if finish_reason == "tool_calls" and tool_calls:
+        print(f"Assistant ({model}): ", end="", flush=True)
+        content, tool_calls, finish_reason = run_completion(
+            client, model, sent, cost_tracker, turn_index, purpose, allow_tools=not force_final
+        )
+
+        if finish_reason != "tool_calls" or not tool_calls or force_final:
+            final_answer = content
+            full_history.append({"role": "assistant", "content": content})
+            break
+
         assistant_msg = {
             "role": "assistant",
             "content": content or None,
@@ -150,12 +178,11 @@ def handle_turn(client, full_history, mode, cost_tracker, cache, turn_index, use
             full_history.append(tool_msg)
             sent.append(tool_msg)
 
-        print(f"Assistant ({model}): ", end="", flush=True)
-        final_content, _, _ = run_completion(client, model, sent, cost_tracker, turn_index, "final_after_tool")
-        full_history.append({"role": "assistant", "content": final_content})
-        final_answer = final_content
-    else:
-        full_history.append({"role": "assistant", "content": content})
+    if not final_answer:
+        # Every round wanted a tool and even the forced no-tools round came
+        # back empty -- surface something rather than an empty response.
+        final_answer = "(no answer produced -- try rephrasing the question)"
+        full_history[-1]["content"] = final_answer
 
     cache.put(cache_key, final_answer)
 
