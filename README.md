@@ -1,5 +1,7 @@
 # Groq CLI Chat
 
+![CI](https://github.com/m-hamzaj/Cli-chat/actions/workflows/ci.yml/badge.svg)
+
 A command-line chat client for the Groq API. Streaming output, multi-turn
 memory, two tools (calculator, fetch_url), a repeat-question cache, and a
 per-call cost log — no LangChain, no agent framework, just a hand-rolled
@@ -17,6 +19,25 @@ docker compose run --rm chat --mode simple  # baseline mode, for comparison
 Type `/cost` any time to see the running session total, `/exit` to quit.
 Every session also writes `logs/costs.jsonl` (one line per API call) and
 `logs/session_summary.json` (one entry per session, appended).
+
+## Testing
+
+```bash
+pip install -r requirements-dev.txt
+pytest -v
+```
+
+`tests/` covers everything that doesn't need a live API call: the
+calculator's math (including that it safely rejects things like
+`__import__('os')` instead of using `eval()`), the pricing formulas, the
+model-routing heuristic, and the repeat-question cache's key matching.
+`fetch_url` is tested against `https://example.com`, the domain reserved
+specifically for this purpose.
+
+CI (`.github/workflows/ci.yml`) runs this test suite plus a Docker build on
+every push and PR. It deliberately does **not** call the real Groq API —
+that would need `GROQ_API_KEY` stored as a GitHub secret and would spend
+real money on every push, including from anyone opening a PR from a fork.
 
 ## Architecture
 
